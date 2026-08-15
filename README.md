@@ -6,4 +6,4 @@ Eu deixei as questões diretamente no front-end, sem colocá-las no banco de dad
 
 Infelizmente, algumas pessoas acabam se aproveitando do trabalho dos outros, sugando os próprios colegas. Ser humano sendo ser humano.
 
-Como o senhor Segundo-Tenente Galvão disse: **“Aluno é lobo do aluno.”** E, pelo visto, alguns acabam seguindo essa lógica, aproveitando-se e sugando os próprios colegas, em vez de valorizar o esforço de cada um. 
+Como o senhor Segundo-Tenente Galvão disse: **“Aluno é lobo do aluno.”** E, pelo visto, alguns acabam seguindo essa lógica, aproveitando-se e sugando os próprios colegas, mas de certo modo ficou engraçado, pegaram um projeto fonte aberta(open source) e comercializaram talves o próximo ato deles será crackear um aplicação grátis kkkkk.
