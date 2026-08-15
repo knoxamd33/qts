@@ -1,76 +1,108 @@
-// sqlite-session-store.js — session store persistente para express-session,
-// usando a mesma conexão node:sqlite do resto do app.
-//
-// Por que isso existe: por padrão o express-session guarda as sessões só em
-// memória (MemoryStore). Isso funciona local, mas em qualquer plataforma que
-// reinicia o processo (deploy novo, "sleep" por inatividade, crash, etc.) —
-// como o Render — todo mundo que estava logado é derrubado, porque a memória
-// zera. Guardando a sessão no mesmo arquivo SQLite dos usuários/respostas
-// (que já fica em disco persistente via DATA_DIR), o login sobrevive a
-// reinícios do servidor.
-const session = require('express-session');
+in continua valendo mesmo depois de o
+// servidor reiniciar.
+const { Store } = require('express-session');
+const db = require('./db');
 
-class SqliteSessionStore extends session.Store {
-  constructor(db) {
-    super();
-    this.db = db;
-    this._stmtGet = db.prepare('SELECT sess, expires_at FROM sessions WHERE sid = ?');
-    this._stmtSet = db.prepare(
-      'INSERT INTO sessions (sid, sess, expires_at) VALUES (?, ?, ?) ' +
-      'ON CONFLICT(sid) DO UPDATE SET sess=excluded.sess, expires_at=excluded.expires_at'
-    );
-    this._stmtDestroy = db.prepare('DELETE FROM sessions WHERE sid = ?');
-    this._stmtTouch = db.prepare('UPDATE sessions SET expires_at = ? WHERE sid = ?');
-    this._stmtPrune = db.prepare('DELETE FROM sessions WHERE expires_at < ?');
-
-    // limpa sessões expiradas periodicamente para o arquivo não crescer sem limite
-    this._pruneInterval = setInterval(() => {
-      try { this._stmtPrune.run(Date.now()); } catch (e) { /* ignora */ }
-    }, 1000 * 60 * 60);
-    if (this._pruneInterval.unref) this._pruneInterval.unref();
+class SqliteSessionStore extends Store {
+  constructor(options = {}) {
+    super(options);
+    // Intervalo (ms) para apagar sessões expiradas do banco. Padrão: 1h.
+    this.cleanupIntervalMs = options.cleanupIntervalMs || 1000 * 60 * 60;
+    this._startCleanup();
   }
 
-  get(sid, cb) {
-    try {
-      const row = this._stmtGet.get(sid);
-      if (!row) return cb(null, null);
-      if (row.expires_at < Date.now()) {
-        this._stmtDestroy.run(sid);
-        return cb(null, null);
+  _startCleanup() {
+    this._cleanupTimer = setInterval(() => {
+      try {
+        db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now());
+      } catch (err) {
+        console.error('[sqlite-session-store] erro ao limpar sessões expiradas:', err);
       }
-      cb(null, JSON.parse(row.sess));
+    }, this.cleanupIntervalMs);
+    // Não impede o processo Node de encerrar por causa desse timer.
+    if (this._cleanupTimer.unref) this._cleanupTimer.unref();
+  }
+
+  _expiresAt(sess) {
+    const ttlMs = sess && sess.cookie && sess.cookie.maxAge
+      ? sess.cookie.maxAge
+      : 1000 * 60 * 60 * 8; // 8h padrão, igual ao maxAge configurado no server.js
+    return Date.now() + ttlMs;
+  }
+
+  get(sid, callback) {
+    try {
+      const row = db.prepare('SELECT sess, expires_at FROM sessions WHERE sid = ?').get(sid);
+      if (!row) return callback(null, null);
+      if (row.expires_at < Date.now()) {
+        db.prepare('DELETE FROM sessions WHERE sid = ?').run(sid);
+        return callback(null, null);
+      }
+      callback(null, JSON.parse(row.sess));
     } catch (err) {
-      cb(err);
+      callback(err);
     }
   }
 
-  set(sid, sess, cb) {
+  set(sid, sess, callback) {
     try {
-      const maxAge = sess.cookie && sess.cookie.maxAge ? sess.cookie.maxAge : 1000 * 60 * 60 * 8;
-      const expiresAt = Date.now() + maxAge;
-      this._stmtSet.run(sid, JSON.stringify(sess), expiresAt);
-      cb && cb(null);
+      const expiresAt = this._expiresAt(sess);
+      const data = JSON.stringify(sess);
+      db.prepare(`
+        INSERT INTO sessions (sid, sess, expires_at) VALUES (?, ?, ?)
+        ON CONFLICT(sid) DO UPDATE SET sess = excluded.sess, expires_at = excluded.expires_at
+      `).run(sid, data, expiresAt);
+      if (callback) callback(null);
     } catch (err) {
-      cb && cb(err);
+      if (callback) callback(err);
     }
   }
 
-  destroy(sid, cb) {
+  destroy(sid, callback) {
     try {
-      this._stmtDestroy.run(sid);
-      cb && cb(null);
+      db.prepare('DELETE FROM sessions WHERE sid = ?').run(sid);
+      if (callback) callback(null);
     } catch (err) {
-      cb && cb(err);
+      if (callback) callback(err);
     }
   }
 
-  touch(sid, sess, cb) {
+  touch(sid, sess, callback) {
     try {
-      const maxAge = sess.cookie && sess.cookie.maxAge ? sess.cookie.maxAge : 1000 * 60 * 60 * 8;
-      this._stmtTouch.run(Date.now() + maxAge, sid);
-      cb && cb(null);
+      const expiresAt = this._expiresAt(sess);
+      const info = db.prepare('UPDATE sessions SET expires_at = ? WHERE sid = ?').run(expiresAt, sid);
+      // Se a sessão ainda não existir na tabela (raro), cria normalmente.
+      if (info.changes === 0) return this.set(sid, sess, callback);
+      if (callback) callback(null);
     } catch (err) {
-      cb && cb(err);
+      if (callback) callback(err);
+    }
+  }
+
+  all(callback) {
+    try {
+      const rows = db.prepare('SELECT sid, sess FROM sessions WHERE expires_at >= ?').all(Date.now());
+      callback(null, rows.map((r) => ({ ...JSON.parse(r.sess), sid: r.sid })));
+    } catch (err) {
+      callback(err);
+    }
+  }
+
+  clear(callback) {
+    try {
+      db.prepare('DELETE FROM sessions').run();
+      if (callback) callback(null);
+    } catch (err) {
+      if (callback) callback(err);
+    }
+  }
+
+  length(callback) {
+    try {
+      const row = db.prepare('SELECT COUNT(*) AS c FROM sessions').get();
+      callback(null, row.c);
+    } catch (err) {
+      callback(err);
     }
   }
 }
